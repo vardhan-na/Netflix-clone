@@ -16,6 +16,6 @@ spec:
     spec:
       containers:
       - name: netflix-app
-        image: vardhan2912/devops:{{ .Values.image.tag }}
+        image: vardhan2912/netflix-clone:{{ .Values.image.tag }}
         ports:
         - containerPort: 80
