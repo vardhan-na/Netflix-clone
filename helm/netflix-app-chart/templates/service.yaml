@@ -11,7 +11,7 @@ spec:
     protocol: TCP
   selector:
     app: netflix-app
-  type: NodePort
+  type: ClusterIp
 
 
 
