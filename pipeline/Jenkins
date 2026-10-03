@@ -1,0 +1,150 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKERHUB_CREDS = credentials('dockerhub-creds')
+    }
+
+    stages {
+
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/vardhan-na/Netflix-clone.git'
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                sh 'yarn install --frozen-lockfile'
+            }
+        }
+
+        stage('Sonarqube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh '''
+                        sonar-scanner \
+                        -Dsonar.projectName=Netflix-clone \
+                        -Dsonar.projectKey=Netflix-clone \
+                        -Dsonar.sources=src
+                    '''
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                waitForQualityGate(
+                    abortPipeline: false,
+                    credentialsId: 'sonar-token'
+                )
+            }
+        }
+
+        stage('OWASP Dependency Check') {
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'nvd-api-key',
+                        variable: 'NVD_API_KEY'
+                    )
+                ]) {
+                    dependencyCheck(
+                        additionalArguments: """
+                            --scan ./
+                            --format ALL
+                            --disableYarnAudit
+                            --disableNodeAudit
+                            --nvdApiKey $NVD_API_KEY
+                            --nvdValidForHours 24
+                        """,
+                        odcInstallation: 'DP-Check'
+                    )
+                }
+
+                dependencyCheckPublisher(
+                    pattern: '**/dependency-check-report.xml'
+                )
+            }
+        }
+
+        stage('Trivy FS Scan') {
+            steps {
+                sh '''
+                    trivy fs . > trivyfs.txt
+                '''
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                sh '''
+                    echo "$DOCKERHUB_CREDS_PSW" | docker login \
+                        -u "$DOCKERHUB_CREDS_USR" \
+                        --password-stdin
+
+                    docker build \
+                        -t "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" .
+
+                    docker push \
+                        "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}"
+                '''
+            }
+        }
+
+        stage('Trivy Image Scan') {
+            steps {
+                sh '''
+                    trivy image \
+                        "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" \
+                        > trivyimage.txt
+                '''
+            }
+        }
+
+        stage('Update Helm values.yaml') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'github-creds',
+                        usernameVariable: 'GIT_USER',
+                        passwordVariable: 'GIT_PASS'
+                    )
+                ]) {
+                    sh '''
+                        sed -i "s/tag: .*/tag: \\"${BUILD_NUMBER}\\"/" \
+                            helm/netflix-app-chart/values.yaml
+
+                        git config user.email "vardhan@example.com"
+                        git config user.name "K A Vardhan"
+
+                        git add helm/netflix-app-chart/values.yaml
+
+                        git commit \
+                            -m "Update image tag to ${BUILD_NUMBER}" || true
+
+                        git push \
+                            https://${GIT_USER}:${GIT_PASS}@github.com/vardhan-na/Netflix-clone.git \
+                            HEAD:main
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts(
+                artifacts: 'trivyfs.txt,trivyimage.txt,dependency-check-report.html,dependency-check-report.xml',
+                allowEmptyArchive: true
+            )
+        }
+    }
+}
