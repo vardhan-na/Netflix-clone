@@ -84,20 +84,23 @@ pipeline {
         }
 
         stage('Docker Build & Push') {
-            steps {
-                sh '''
-                    echo "$DOCKERHUB_CREDS_PSW" | docker login \
-                        -u "$DOCKERHUB_CREDS_USR" \
-                        --password-stdin
+    steps {
+        withCredentials([string(credentialsId: 'tmdb-api-key', variable: 'TMDB_KEY')]) {
+            sh '''
+                echo "$DOCKERHUB_CREDS_PSW" | docker login \
+                    -u "$DOCKERHUB_CREDS_USR" \
+                    --password-stdin
 
-                    docker build \
-                        -t "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" .
+                docker build \
+                    --build-arg TMDB_V3_API_KEY="$TMDB_KEY" \
+                    -t "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" .
 
-                    docker push \
-                        "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}"
-                '''
-            }
+                docker push \
+                    "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}"
+            '''
         }
+    }
+}
 
         stage('Trivy Image Scan') {
             steps {
