@@ -84,20 +84,23 @@ pipeline {
         }
 
         stage('Docker Build & Push') {
-            steps {
-                sh '''
-                    echo "$DOCKERHUB_CREDS_PSW" | docker login \
-                        -u "$DOCKERHUB_CREDS_USR" \
-                        --password-stdin
+    steps {
+        withCredentials([string(credentialsId: 'tmdb-api-key', variable: 'TMDB_KEY')]) {
+            sh '''
+                echo "$DOCKERHUB_CREDS_PSW" | docker login \
+                    -u "$DOCKERHUB_CREDS_USR" \
+                    --password-stdin
 
-                    docker build \
-                        -t "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" .
+                docker build \
+                    --build-arg TMDB_V3_API_KEY="$TMDB_KEY" \
+                    -t "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" .
 
-                    docker push \
-                        "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}"
-                '''
-            }
+                docker push \
+                    "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}"
+            '''
         }
+    }
+}
 
         stage('Trivy Image Scan') {
             steps {
@@ -122,7 +125,7 @@ pipeline {
                         sed -i "s/tag: .*/tag: \\"${BUILD_NUMBER}\\"/" \
                             helm/netflix-app-chart/values.yaml
 
-                        git config user.email "vardhanknayak@gmail.com"
+                        git config user.email "vardhan@example.com"
                         git config user.name "K A Vardhan"
 
                         git add helm/netflix-app-chart/values.yaml
