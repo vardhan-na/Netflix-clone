@@ -205,8 +205,8 @@ pipeline {
                             helm/netflix-app-chart/values.yaml
 
                         # Identity used for the commit
-                        git config user.email "jenkins@your-domain.com"
-                        git config user.name "Jenkins CI"
+                        git config user.email "vardhanknayak@gmail.com"
+                        git config user.name "Vardhan"
 
                         # Stage the changed file
                         git add helm/netflix-app-chart/values.yaml
