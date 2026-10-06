@@ -185,4 +185,63 @@ pipeline {
                     usernamePassword(
                         credentialsId: 'github-creds',
                         usernameVariable: 'GIT_USER',
-                        passwordVariable:
+                        passwordVariable: 'GIT_PASS'
+                    )
+                ]) {
+                    sh '''
+                        # Stop immediately if any command fails
+                        set -e
+
+                        # Temporary askpass helper so the token never appears in a URL
+                        ASKPASS="$(mktemp)"
+                        trap 'rm -f "$ASKPASS"' EXIT
+                        printf '#!/bin/sh\\ncase "$1" in\\n  Username*) echo "$GIT_USER" ;;\\n  *) echo "$GIT_PASS" ;;\\nesac\\n' > "$ASKPASS"
+                        chmod 700 "$ASKPASS"
+                        export GIT_ASKPASS="$ASKPASS"
+                        export GIT_TERMINAL_PROMPT=0
+
+                        # Update only the tag line, keeping indentation
+                        sed -i -E "s/^([[:space:]]*tag:).*/\\1 \\"${BUILD_NUMBER}\\"/" \
+                            helm/netflix-app-chart/values.yaml
+
+                        # Identity used for the commit
+                        git config user.email "jenkins@your-domain.com"
+                        git config user.name "Jenkins CI"
+
+                        # Stage the changed file
+                        git add helm/netflix-app-chart/values.yaml
+
+                        # Commit only if something changed; real errors are not swallowed.
+                        # [skip ci] stops this commit from triggering another build
+                        git diff --cached --quiet || \
+                            git commit -m "Update image tag to ${BUILD_NUMBER} [skip ci]"
+
+                        # Pick up any commits pushed while this build was running
+                        git fetch origin main
+                        git rebase origin/main
+
+                        # Push the change to main
+                        git push origin HEAD:main
+                    '''
+                }
+            }
+        }
+    }
+
+    // ---------- Runs after all stages, pass or fail ----------
+    post {
+        always {
+            // Save scan reports on the build page; no error if a report is missing
+            archiveArtifacts(
+                artifacts: 'trivyfs.txt,trivyimage.txt,dependency-check-report.html,dependency-check-report.xml',
+                allowEmptyArchive: true
+            )
+            // Cleanup: log out, remove this build's image, clear unused images
+            sh '''
+                docker logout || true
+                docker rmi "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" || true
+                docker image prune -f || true
+            '''
+        }
+    }
+}
