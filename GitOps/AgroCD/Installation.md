@@ -7,19 +7,20 @@ kubectl create namespace argocd
 kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 ```
 
-## Access the Argo CD UI (Loadbalancer service) 
+## Access the Argo CD UI (NodePort service)
 
 ```bash
-kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
+kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "NodePort"}}'
 ```
-## Access the Argo CD UI (Loadbalancer service) -For Windows
+## Access the Argo CD UI (NodePort service) - For Windows
 
 ```bash
-kubectl patch svc argocd-server -n argocd -p '{\"spec\": {\"type\": \"LoadBalancer\"}}'
+kubectl patch svc argocd-server -n argocd -p '{\"spec\": {\"type\": \"NodePort\"}}'
 ```
 
-## Get the Loadbalancer service IP
+## Get the NodePort service port
 
 ```bash
 kubectl get svc argocd-server -n argocd
+
 ```
