@@ -2,3 +2,8 @@
 ```bash
 winget install Helm.Helm
 ```
+## Check the version installed
+
+```bash
+helm version
+```
