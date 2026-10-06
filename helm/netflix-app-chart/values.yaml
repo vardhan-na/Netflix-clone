@@ -8,7 +8,7 @@ image:
   repository: vardhan2912/netflix-clone
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "27"
+  tag: "33"
 
 ingress:
   enabled: false
