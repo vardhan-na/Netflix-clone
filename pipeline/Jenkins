@@ -1,7 +1,14 @@
 pipeline {
     agent any
 
+    options {
+        timeout(time: 60, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
     environment {
+        // Exposes DOCKERHUB_CREDS_USR and DOCKERHUB_CREDS_PSW
         DOCKERHUB_CREDS = credentials('dockerhub-creds')
     }
 
@@ -41,10 +48,13 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
-                waitForQualityGate(
-                    abortPipeline: false,
-                    credentialsId: 'sonar-token'
-                )
+                // Needs the SonarQube -> Jenkins webhook, otherwise this waits until the timeout
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate(
+                        abortPipeline: true,
+                        credentialsId: 'sonar-token'
+                    )
+                }
             }
         }
 
@@ -77,37 +87,53 @@ pipeline {
 
         stage('Trivy FS Scan') {
             steps {
+                // Report only; change --exit-code to 1 to make filesystem findings fail the build
                 sh '''
-                    trivy fs . > trivyfs.txt
+                    trivy fs \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 0 \
+                        --output trivyfs.txt \
+                        .
                 '''
             }
         }
 
-        stage('Docker Build & Push') {
-    steps {
-        withCredentials([string(credentialsId: 'tmdb-api-key', variable: 'TMDB_KEY')]) {
-            sh '''
-                echo "$DOCKERHUB_CREDS_PSW" | docker login \
-                    -u "$DOCKERHUB_CREDS_USR" \
-                    --password-stdin
-
-                docker build \
-                    --build-arg TMDB_V3_API_KEY="$TMDB_KEY" \
-                    -t "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" .
-
-                docker push \
-                    "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}"
-            '''
+        stage('Docker Build') {
+            steps {
+                withCredentials([string(credentialsId: 'tmdb-api-key', variable: 'TMDB_KEY')]) {
+                    sh '''
+                        docker build \
+                            --build-arg TMDB_V3_API_KEY="$TMDB_KEY" \
+                            -t "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" .
+                    '''
+                }
+            }
         }
-    }
-}
 
         stage('Trivy Image Scan') {
             steps {
+                // Runs BEFORE push: HIGH/CRITICAL fixable vulns fail the build,
+                // so a vulnerable image never reaches Docker Hub
                 sh '''
                     trivy image \
-                        "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" \
-                        > trivyimage.txt
+                        --severity HIGH,CRITICAL \
+                        --ignore-unfixed \
+                        --exit-code 1 \
+                        --output trivyimage.txt \
+                        "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}"
+                '''
+            }
+        }
+
+        stage('Docker Push') {
+            steps {
+                sh '''
+                    echo "$DOCKERHUB_CREDS_PSW" | docker login \
+                        -u "$DOCKERHUB_CREDS_USR" \
+                        --password-stdin
+
+                    docker push \
+                        "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}"
                 '''
             }
         }
@@ -122,20 +148,34 @@ pipeline {
                     )
                 ]) {
                     sh '''
-                        sed -i "s/tag: .*/tag: \\"${BUILD_NUMBER}\\"/" \
+                        set -e
+
+                        # Temporary askpass helper so the token never appears in a URL
+                        ASKPASS="$(mktemp)"
+                        trap 'rm -f "$ASKPASS"' EXIT
+                        printf '#!/bin/sh\\ncase "$1" in\\n  Username*) echo "$GIT_USER" ;;\\n  *) echo "$GIT_PASS" ;;\\nesac\\n' > "$ASKPASS"
+                        chmod 700 "$ASKPASS"
+                        export GIT_ASKPASS="$ASKPASS"
+                        export GIT_TERMINAL_PROMPT=0
+
+                        # Update only the tag line, keeping indentation
+                        sed -i -E "s/^([[:space:]]*tag:).*/\\1 \\"${BUILD_NUMBER}\\"/" \
                             helm/netflix-app-chart/values.yaml
 
-                        git config user.email "vardhanknayak@gmail.com"
-                        git config user.name "K A Vardhan"
+                        git config user.email "jenkins@your-domain.com"
+                        git config user.name "Jenkins CI"
 
                         git add helm/netflix-app-chart/values.yaml
 
-                        git commit \
-                            -m "Update image tag to ${BUILD_NUMBER}" || true
+                        # Commit only if something changed; real errors are not swallowed
+                        git diff --cached --quiet || \
+                            git commit -m "Update image tag to ${BUILD_NUMBER} [skip ci]"
 
-                        git push \
-                            https://${GIT_USER}:${GIT_PASS}@github.com/vardhan-na/Netflix-clone.git \
-                            HEAD:main
+                        # Pick up any commits pushed while this build was running
+                        git fetch origin main
+                        git rebase origin/main
+
+                        git push origin HEAD:main
                     '''
                 }
             }
@@ -148,6 +188,11 @@ pipeline {
                 artifacts: 'trivyfs.txt,trivyimage.txt,dependency-check-report.html,dependency-check-report.xml',
                 allowEmptyArchive: true
             )
+            sh '''
+                docker logout || true
+                docker rmi "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" || true
+                docker image prune -f || true
+            '''
         }
     }
 }
