@@ -125,7 +125,7 @@ pipeline {
                         sed -i "s/tag: .*/tag: \\"${BUILD_NUMBER}\\"/" \
                             helm/netflix-app-chart/values.yaml
 
-                        git config user.email "vardhan@example.com"
+                        git config user.email "vardhanknayak@gmail.com"
                         git config user.name "K A Vardhan"
 
                         git add helm/netflix-app-chart/values.yaml
