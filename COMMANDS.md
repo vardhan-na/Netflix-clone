@@ -1,3 +1,4 @@
+
 # Commands and Troubleshooting Cheat Sheet
 
 Command reference for the Netflix Clone DevSecOps project: **Jenkins + Docker + SonarQube + Trivy + Helm + Kubernetes (EKS) + Argo CD**.
