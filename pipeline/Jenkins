@@ -1,0 +1,248 @@
+// ============================================================
+// Netflix Clone - CI/CD Pipeline (Jenkins)
+// Flow: checkout -> code scans -> build -> image scan -> push -> GitOps update
+// ============================================================
+pipeline {
+
+    // Run on any available Jenkins agent/node
+    agent any
+
+    // ---------- Global job settings ----------
+    options {
+        // Abort the whole build if it runs longer than 60 minutes
+        timeout(time: 60, unit: 'MINUTES')
+        // Do not allow two builds at once (avoids clashing Git pushes)
+        disableConcurrentBuilds()
+        // Keep only the last 10 builds to save disk space
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    // ---------- Global variables ----------
+    environment {
+        // Loads Docker Hub login from Jenkins credentials.
+        // Jenkins creates DOCKERHUB_CREDS_USR (username) and DOCKERHUB_CREDS_PSW (password)
+        DOCKERHUB_CREDS = credentials('dockerhub-creds')
+    }
+
+    stages {
+
+        // STAGE 1: Delete files left over from the previous build
+        // so old files cannot affect this build
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        // STAGE 2: Pull the latest source code from GitHub (main branch)
+        stage('Checkout from Git') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/vardhan-na/Netflix-clone.git'
+            }
+        }
+
+        // STAGE 3: Install project libraries.
+        // --frozen-lockfile installs the exact versions in yarn.lock
+        // and fails if the lockfile is out of date (repeatable builds)
+        stage('Install Dependencies') {
+            steps {
+                sh 'yarn install --frozen-lockfile'
+            }
+        }
+
+        // STAGE 4: Static code analysis.
+        // Scans the source in src/ for bugs, code smells and security issues,
+        // then uploads the results to the SonarQube server
+        stage('Sonarqube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh '''
+                        sonar-scanner \
+                        -Dsonar.projectName=Netflix-clone \
+                        -Dsonar.projectKey=Netflix-clone \
+                        -Dsonar.sources=src
+                    '''
+                }
+            }
+        }
+
+        // STAGE 5: Wait for SonarQube's pass/fail result.
+        // abortPipeline: true  -> a failed gate stops the pipeline here.
+        // Needs the SonarQube -> Jenkins webhook, otherwise it waits until
+        // the 5 minute timeout and then fails
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate(
+                        abortPipeline: true,
+                        credentialsId: 'sonar-token'
+                    )
+                }
+            }
+        }
+
+        // STAGE 6: Check third-party libraries for known vulnerabilities (NVD database).
+        // The NVD API key makes the database download faster.
+        // Produces HTML + XML reports
+        stage('OWASP Dependency Check') {
+            steps {
+                // Load the NVD API key securely (hidden in logs)
+                withCredentials([
+                    string(
+                        credentialsId: 'nvd-api-key',
+                        variable: 'NVD_API_KEY'
+                    )
+                ]) {
+                    dependencyCheck(
+                        additionalArguments: """
+                            --scan ./
+                            --format ALL
+                            --disableYarnAudit
+                            --disableNodeAudit
+                            --nvdApiKey $NVD_API_KEY
+                            --nvdValidForHours 24
+                        """,
+                        odcInstallation: 'DP-Check'
+                    )
+                }
+
+                // Show the report inside Jenkins
+                dependencyCheckPublisher(
+                    pattern: '**/dependency-check-report.xml'
+                )
+            }
+        }
+
+        // STAGE 7: Scan project files for HIGH/CRITICAL vulnerabilities.
+        // Report only (--exit-code 0): never fails the build.
+        // Change to --exit-code 1 to make it fail on findings
+        stage('Trivy FS Scan') {
+            steps {
+                sh '''
+                    trivy fs \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 0 \
+                        --output trivyfs.txt \
+                        .
+                '''
+            }
+        }
+
+        // STAGE 8: Build the Docker image, tagged with the build number
+        // (example: yourname/netflix-clone:15).
+        // The TMDB API key is passed as a build argument so the app can fetch movie data
+        stage('Docker Build') {
+            steps {
+                withCredentials([string(credentialsId: 'tmdb-api-key', variable: 'TMDB_KEY')]) {
+                    sh '''
+                        docker build \
+                            -f Docker/docker_file \
+                            --build-arg TMDB_V3_API_KEY="$TMDB_KEY" \
+                            -t "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" .
+                    '''
+                }
+            }
+        }
+
+        // STAGE 9: Scan the built image BEFORE pushing it.
+        // Fixable HIGH/CRITICAL vulnerabilities fail the build (--exit-code 1),
+        // so a vulnerable image never reaches Docker Hub
+        stage('Trivy Image Scan') {
+            steps {
+                sh '''
+                    trivy image \
+                        --severity HIGH,CRITICAL \
+                        --ignore-unfixed \
+                        --exit-code 1 \
+                        --output trivyimage.txt \
+                        "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}"
+                '''
+            }
+        }
+
+        // STAGE 10: Log in to Docker Hub and upload the image.
+        // Only runs if the image scan passed.
+        // The password is sent through stdin so it does not show in logs
+        stage('Docker Push') {
+            steps {
+                sh '''
+                    echo "$DOCKERHUB_CREDS_PSW" | docker login \
+                        -u "$DOCKERHUB_CREDS_USR" \
+                        --password-stdin
+
+                    docker push \
+                        "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}"
+                '''
+            }
+        }
+
+        // STAGE 11: GitOps step - write the new image tag into the Helm chart in Git.
+        // The deploy tool (e.g. Argo CD) sees the change and rolls out the new image
+        stage('Update Helm values.yaml') {
+            steps {
+                // Load GitHub username and token securely
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'github-creds',
+                        usernameVariable: 'GIT_USER',
+                        passwordVariable: 'GIT_PASS'
+                    )
+                ]) {
+                    sh '''
+                        # Stop immediately if any command fails
+                        set -e
+
+                        # Temporary askpass helper so the token never appears in a URL
+                        ASKPASS="$(mktemp)"
+                        trap 'rm -f "$ASKPASS"' EXIT
+                        printf '#!/bin/sh\\ncase "$1" in\\n  Username*) echo "$GIT_USER" ;;\\n  *) echo "$GIT_PASS" ;;\\nesac\\n' > "$ASKPASS"
+                        chmod 700 "$ASKPASS"
+                        export GIT_ASKPASS="$ASKPASS"
+                        export GIT_TERMINAL_PROMPT=0
+
+                        # Update only the tag line, keeping indentation
+                        sed -i -E "s/^([[:space:]]*tag:).*/\\1 \\"${BUILD_NUMBER}\\"/" \
+                            helm/netflix-app-chart/values.yaml
+
+                        # Identity used for the commit
+                        git config user.email "vardhanknayak@gmail.com"
+                        git config user.name "Vardhan"
+
+                        # Stage the changed file
+                        git add helm/netflix-app-chart/values.yaml
+
+                        # Commit only if something changed; real errors are not swallowed.
+                        # [skip ci] stops this commit from triggering another build
+                        git diff --cached --quiet || \
+                            git commit -m "Update image tag to ${BUILD_NUMBER} [skip ci]"
+
+                        # Pick up any commits pushed while this build was running
+                        git fetch origin main
+                        git rebase origin/main
+
+                        # Push the change to main
+                        git push origin HEAD:main
+                    '''
+                }
+            }
+        }
+    }
+
+    // ---------- Runs after all stages, pass or fail ----------
+    post {
+        always {
+            // Save scan reports on the build page; no error if a report is missing
+            archiveArtifacts(
+                artifacts: 'trivyfs.txt,trivyimage.txt,dependency-check-report.html,dependency-check-report.xml',
+                allowEmptyArchive: true
+            )
+            // Cleanup: log out, remove this build's image, clear unused images
+            sh '''
+                docker logout || true
+                docker rmi "$DOCKERHUB_CREDS_USR/netflix-clone:${BUILD_NUMBER}" || true
+                docker image prune -f || true
+            '''
+        }
+    }
+}
