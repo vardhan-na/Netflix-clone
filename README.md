@@ -132,7 +132,6 @@ flowchart TB
 | 12 | Kubernetes pulls the new image from Docker Hub and updates the Pods |
 | 13 | Users reach the app through the NGINX Ingress Controller → Ingress → Service → Pod |
 
-> Screenshots (Jenkins pipeline, SonarQube, Argo CD UI, running app): _TBD_
 
 ---
 
